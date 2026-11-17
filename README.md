@@ -7,8 +7,43 @@
 
 Package imaging provides basic image processing functions (resize, rotate, crop, brightness/contrast adjustments, etc.).
 
-All the image processing functions provided by the package accept any image type that implements `image.Image` interface
-as an input, and return a new image of `*image.NRGBA` type (32bit RGBA colors, non-premultiplied alpha).
+The original processing functions accept any `image.Image` and return
+`*image.NRGBA` (8 bits per channel, non-premultiplied alpha). They are
+unchanged. Depth-aware variants use the `*WithDepth` suffix and preserve 10-bit
+input when no explicit target is supplied.
+
+### 10-bit processing
+
+```go
+// Decode, thumbnail, and save without an 8-bit intermediate.
+src, err := imaging.Open10("input.png")
+if err != nil {
+	log.Fatal(err)
+}
+thumb, err := imaging.Thumbnail10(src, 320, 320, imaging.Lanczos)
+if err != nil {
+	log.Fatal(err)
+}
+if err := imaging.Save10(thumb, "thumb.png"); err != nil {
+	log.Fatal(err)
+}
+
+// Convert an 8-bit source to 10 bit with optional ordered dither.
+dst, err := imaging.ResizeWithDepth(
+	src8, 800, 0, imaging.Lanczos,
+	imaging.WithBitDepth(imaging.BitDepth10),
+	imaging.WithDither(imaging.DitherOrdered),
+)
+```
+
+Use `WithBitDepthLogger` to log the input, target, and output depth for every
+processing stage. JPEG, GIF, and BMP are rejected for 10-bit output instead of
+silently dropping to 8 bit. PNG and TIFF retain 10 significant bits in their
+16-bit container; `FormatYUV420P10LE` / `.yuv` writes native planar 10-bit
+samples explicitly.
+
+See [10BIT.md](10BIT.md) for migration, concurrency, cleanup, size, and known
+limitations.
 
 ## Installation
 

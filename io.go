@@ -3,6 +3,7 @@ package imaging
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"image"
 	"image/draw"
 	"image/gif"
@@ -32,6 +33,11 @@ var fs fileSystem = localFS{}
 
 type decodeConfig struct {
 	autoOrientation bool
+	bitDepth        BitDepth
+	depthSet        bool
+	declaredDepth   BitDepth
+	dither          DitherMode
+	logger          BitDepthLogger
 }
 
 var defaultDecodeConfig = decodeConfig{
@@ -57,7 +63,42 @@ func Decode(r io.Reader, opts ...DecodeOption) (image.Image, error) {
 		option(&cfg)
 	}
 
-	if !cfg.autoOrientation {
+	if cfg.depthSet || cfg.bitDepth != BitDepthAuto || cfg.declaredDepth != BitDepthAuto ||
+		cfg.dither != DitherNone || cfg.logger != nil {
+		depthCfg := depthConfig{
+			target:   cfg.bitDepth,
+			declared: cfg.declaredDepth,
+			dither:   cfg.dither,
+			logger:   cfg.logger,
+		}
+		if cfg.declaredDepth != BitDepthAuto {
+			depthCfg.input = cfg.declaredDepth
+		}
+		depthCfg.logEnter("decode")
+
+		img, err := decodeImage(r, cfg.autoOrientation)
+		if err != nil {
+			depthCfg.logFail("decode", err)
+			return nil, err
+		}
+		if err := depthCfg.resolve(img); err != nil {
+			depthCfg.logFail("decode", err)
+			return nil, err
+		}
+		dst, err := cloneAtDepth(img, depthCfg.targetResolved, depthCfg.dither)
+		if err != nil {
+			depthCfg.logFail("decode", err)
+			return nil, err
+		}
+		depthCfg.logExit("decode")
+		return dst, nil
+	}
+
+	return decodeImage(r, cfg.autoOrientation)
+}
+
+func decodeImage(r io.Reader, autoOrientation bool) (image.Image, error) {
+	if !autoOrientation {
 		img, _, err := image.Decode(r)
 		return img, err
 	}
@@ -91,7 +132,6 @@ func Decode(r io.Reader, opts ...DecodeOption) (image.Image, error) {
 //
 //	// Load an image and transform it depending on the EXIF orientation tag (if present).
 //	img, err := imaging.Open("test.jpg", imaging.AutoOrientation(true))
-//
 func Open(filename string, opts ...DecodeOption) (image.Image, error) {
 	file, err := fs.Open(filename)
 	if err != nil {
@@ -111,6 +151,7 @@ const (
 	GIF
 	TIFF
 	BMP
+	FormatYUV420P10LE
 )
 
 var formatExts = map[string]Format{
@@ -124,11 +165,12 @@ var formatExts = map[string]Format{
 }
 
 var formatNames = map[Format]string{
-	JPEG: "JPEG",
-	PNG:  "PNG",
-	GIF:  "GIF",
-	TIFF: "TIFF",
-	BMP:  "BMP",
+	JPEG:              "JPEG",
+	PNG:               "PNG",
+	GIF:               "GIF",
+	TIFF:              "TIFF",
+	BMP:               "BMP",
+	FormatYUV420P10LE: "YUV420P10LE",
 }
 
 func (f Format) String() string {
@@ -160,6 +202,11 @@ type encodeConfig struct {
 	gifQuantizer        draw.Quantizer
 	gifDrawer           draw.Drawer
 	pngCompressionLevel png.CompressionLevel
+	bitDepth            BitDepth
+	depthSet            bool
+	declaredDepth       BitDepth
+	dither              DitherMode
+	logger              BitDepthLogger
 }
 
 var defaultEncodeConfig = encodeConfig{
@@ -219,7 +266,18 @@ func Encode(w io.Writer, img image.Image, format Format, opts ...EncodeOption) e
 	for _, option := range opts {
 		option(&cfg)
 	}
+	return encodeWithConfig(w, img, format, cfg)
+}
 
+func encodeWithConfig(w io.Writer, img image.Image, format Format, cfg encodeConfig) error {
+	if cfg.depthSet || cfg.bitDepth != BitDepthAuto || cfg.declaredDepth != BitDepthAuto ||
+		cfg.dither != DitherNone || cfg.logger != nil {
+		return encodeAtDepth(w, img, format, cfg)
+	}
+	return encodeStandard(w, img, format, cfg)
+}
+
+func encodeStandard(w io.Writer, img image.Image, format Format, cfg encodeConfig) error {
 	switch format {
 	case JPEG:
 		if nrgba, ok := img.(*image.NRGBA); ok && nrgba.Opaque() {
@@ -264,17 +322,33 @@ func Encode(w io.Writer, img image.Image, format Format, opts ...EncodeOption) e
 //
 //	// Save the image as JPEG with optional quality parameter set to 80.
 //	err := imaging.Save(img, "out.jpg", imaging.JPEGQuality(80))
-//
 func Save(img image.Image, filename string, opts ...EncodeOption) (err error) {
-	f, err := FormatFromFilename(filename)
-	if err != nil {
-		return err
+	cfg := defaultEncodeConfig
+	for _, option := range opts {
+		option(&cfg)
 	}
+
+	f, formatErr := FormatFromFilename(filename)
+	if formatErr != nil && (cfg.depthSet || cfg.bitDepth != BitDepthAuto) &&
+		strings.EqualFold(filepath.Ext(filename), ".yuv") {
+		f = FormatYUV420P10LE
+	} else if formatErr != nil {
+		if cfg.depthSet || cfg.bitDepth != BitDepthAuto {
+			return fmt.Errorf("%w: %v; use .png, .tif/.tiff, or .yuv (YUV420P10LE)",
+				ErrUnsupportedBitDepth, formatErr)
+		}
+		return formatErr
+	}
+	if cfg.depthSet || cfg.bitDepth != BitDepthAuto || cfg.declaredDepth != BitDepthAuto ||
+		cfg.dither != DitherNone || cfg.logger != nil {
+		return saveAtomic(img, filename, f, cfg)
+	}
+
 	file, err := fs.Create(filename)
 	if err != nil {
 		return err
 	}
-	err = Encode(file, img, f, opts...)
+	err = encodeWithConfig(file, img, f, cfg)
 	errc := file.Close()
 	if err == nil {
 		err = errc
@@ -423,6 +497,34 @@ func readOrientation(r io.Reader) orientation {
 
 // fixOrientation applies a transform to img corresponding to the given orientation flag.
 func fixOrientation(img image.Image, o orientation) image.Image {
+	depth := DetectBitDepth(img)
+	if depth == BitDepth10 || depth == BitDepth16 {
+		src := img
+		opts := []DepthOption{WithBitDepth(depth)}
+		var err error
+		switch o {
+		case orientationNormal:
+		case orientationFlipH:
+			img, err = FlipHWithDepth(img, opts...)
+		case orientationFlipV:
+			img, err = FlipVWithDepth(img, opts...)
+		case orientationRotate90:
+			img, err = Rotate90WithDepth(img, opts...)
+		case orientationRotate180:
+			img, err = Rotate180WithDepth(img, opts...)
+		case orientationRotate270:
+			img, err = Rotate270WithDepth(img, opts...)
+		case orientationTranspose:
+			img, err = TransposeWithDepth(img, opts...)
+		case orientationTransverse:
+			img, err = TransverseWithDepth(img, opts...)
+		}
+		if err != nil {
+			return src
+		}
+		return img
+	}
+
 	switch o {
 	case orientationNormal:
 	case orientationFlipH:
