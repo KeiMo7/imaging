@@ -22,6 +22,90 @@ https://pkg.go.dev/github.com/disintegration/imaging
 
 A few usage examples can be found below. See the documentation for the full list of supported functions.
 
+### Batch processing
+
+`ProcessBatch` processes a group of files with one validated parameter set. Results are returned in
+the same order as the inputs, even when items finish in a different order. A failed item does not
+stop the rest of the batch.
+
+```go
+inputs := []imaging.BatchInput{
+    {Source: "uploads/a.jpg", Destination: "out/a.jpg"},
+    {Source: "uploads/b.png", Destination: "out/b.png"},
+}
+
+result, err := imaging.ProcessBatch(
+    inputs,
+    imaging.BatchParams{
+        Operation: imaging.BatchThumbnail,
+        Width:     320,
+        Height:    320,
+        Filter:    imaging.Lanczos,
+    },
+    imaging.BatchOptions{
+        Concurrency:   4,
+        BatchSize:     32,
+        MaxBatchBytes: 64 << 20,
+        Progress: func(p imaging.BatchProgress) {
+            log.Printf("completed=%d failed=%d active=%d", p.Completed, p.Failed, p.Active)
+        },
+    },
+)
+if err != nil {
+    // The batch could not start because the shared parameters were invalid.
+    log.Fatal(err)
+}
+
+for _, item := range result.Items {
+    if item.Status == imaging.BatchStatusFailed {
+        log.Printf("%s: %v", item.Source, item.Err)
+    }
+}
+```
+
+The built-in operations are `BatchResize`, `BatchFit`, `BatchFill`, `BatchThumbnail` and
+`BatchOriginal`. Set `BatchParams.Process` to use a custom operation. A custom operation runs
+concurrently and must be safe for concurrent use.
+
+`BatchParams.Validate`, when provided, is called exactly once before any input is opened. Invalid
+batch parameters return `ErrInvalidBatchParams` and start no work. Item-level open, decode, process
+and save errors are recorded in `BatchItemResult.Err` with the original filename and do not abort the
+batch.
+
+`Concurrency` limits the number of decoded images in flight. Values less than or equal to zero fall
+back to a safe default and produce an entry in `result.Warnings`. `BatchSize` and `MaxBatchBytes`
+limit the scheduling queue by item count and total source-file size. A single file larger than
+`MaxBatchBytes` is placed in its own scheduling batch. Pixel buffers are allocated per active item,
+not for the whole input list, so peak image memory tracks concurrency rather than total batch size.
+
+Use `ProcessBatchAsync` when the caller needs to observe or cancel a running batch:
+
+```go
+job, err := imaging.ProcessBatchAsync(inputs, params, opts)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Progress snapshots are safe to read from another goroutine.
+log.Printf("active=%d", job.Progress().Active)
+
+// Cancel stops dispatching new inputs. Inputs already running are allowed to finish.
+job.Cancel()
+result := job.Wait()
+```
+
+Canceled items have status `BatchStatusCanceled` and error `ErrBatchCanceled`. `ProcessBatchContext`
+provides the same graceful cancellation behavior through a `context.Context`.
+
+`BatchResult.RetryInputs` returns failed inputs in their original order. The failure manifest can
+also be exported as JSON:
+
+```go
+err := result.WriteFailureList("failed-images.json")
+```
+
+The manifest contains the original filename, destination and error for each failed item.
+
 ### Image resizing
 
 ```go

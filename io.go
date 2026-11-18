@@ -27,6 +27,7 @@ type localFS struct{}
 
 func (localFS) Create(name string) (io.WriteCloser, error) { return os.Create(name) }
 func (localFS) Open(name string) (io.ReadCloser, error)    { return os.Open(name) }
+func (localFS) Stat(name string) (os.FileInfo, error)      { return os.Stat(name) }
 
 var fs fileSystem = localFS{}
 
