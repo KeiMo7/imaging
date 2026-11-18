@@ -38,6 +38,37 @@ dstImageFit := imaging.Fit(srcImage, 800, 600, imaging.Lanczos)
 dstImageFill := imaging.Fill(srcImage, 100, 100, imaging.Center, imaging.Lanczos)
 ```
 
+### Subpixel cropping
+
+`CropSubpixel` accepts fractional crop boundaries and can apply a different fill
+strategy to each edge. The existing `Crop` function keeps its integer-coordinate
+behavior unchanged.
+
+```go
+dst, meta, err := imaging.CropSubpixel(
+	srcImage,
+	imaging.FloatRect{MinX: 12.25, MinY: 8.5, MaxX: 412.75, MaxY: 308.5},
+	imaging.SubpixelCropOptions{
+		Width:      400,
+		Height:     300,
+		Rounding:   imaging.RoundHalfUp,
+		FilterName: "linear",
+		FillColor:  []uint8{0, 0, 0, 0},
+		Fill: imaging.EdgeFillConfig{
+			Top:    imaging.FillMirror,
+			Right:  imaging.FillEdge,
+			Bottom: imaging.FillConstant,
+			Left:   imaging.FillMirror,
+		},
+	},
+)
+```
+
+`FillColor` expects one value for grayscale sources, three for RGB sources, and
+four for RGBA sources. `meta.Rounding` records the rule used to convert
+fractional output dimensions to pixels. A crop rectangle that does not overlap
+the source returns `imaging.ErrCropOutside`.
+
 Imaging supports image resizing using various resampling filters. The most notable ones:
 - `Lanczos` - A high-quality resampling filter for photographic images yielding sharp results.
 - `CatmullRom` - A sharp cubic filter that is faster than Lanczos filter while providing similar results.

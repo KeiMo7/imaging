@@ -11,7 +11,14 @@ type indexWeight struct {
 }
 
 func precomputeWeights(dstSize, srcSize int, filter ResampleFilter) [][]indexWeight {
-	du := float64(srcSize) / float64(dstSize)
+	return precomputeWeightsRange(dstSize, 0, float64(srcSize), 0, srcSize-1, filter, true)
+}
+
+// precomputeWeightsRange computes normalized resampling weights for a source
+// coordinate range. When clip is true, source indices are clipped to
+// [minIndex, maxIndex], preserving the behavior of the original Resize path.
+func precomputeWeightsRange(dstSize int, start, span float64, minIndex, maxIndex int, filter ResampleFilter, clip bool) [][]indexWeight {
+	du := span / float64(dstSize)
 	scale := du
 	if scale < 1.0 {
 		scale = 1.0
@@ -22,15 +29,17 @@ func precomputeWeights(dstSize, srcSize int, filter ResampleFilter) [][]indexWei
 	tmp := make([]indexWeight, 0, dstSize*int(ru+2)*2)
 
 	for v := 0; v < dstSize; v++ {
-		fu := (float64(v)+0.5)*du - 0.5
+		fu := start + (float64(v)+0.5)*du - 0.5
 
 		begin := int(math.Ceil(fu - ru))
-		if begin < 0 {
-			begin = 0
-		}
 		end := int(math.Floor(fu + ru))
-		if end > srcSize-1 {
-			end = srcSize - 1
+		if clip {
+			if begin < minIndex {
+				begin = minIndex
+			}
+			if end > maxIndex {
+				end = maxIndex
+			}
 		}
 
 		var sum float64
