@@ -48,6 +48,48 @@ Imaging supports image resizing using various resampling filters. The most notab
 
 The full list of supported filters:  NearestNeighbor, Box, Linear, Hermite, MitchellNetravali, CatmullRom, BSpline, Gaussian, Lanczos, Hann, Hamming, Blackman, Bartlett, Welch, Cosine. Custom filters can be created using ResampleFilter struct.
 
+### Automatic filter selection
+
+`ResizeAuto` is an independent, opt-in entry point. The existing `Resize`, `Fit`,
+and `Fill` behavior is unchanged. Automatic selection uses only dimensions,
+channel metadata, optional input metadata, and caller scene hints; it does not
+scan source pixels.
+
+```go
+options := imaging.DefaultAutoResizeOptions()
+options.Hint = imaging.SceneHintPortrait
+
+dst, report, err := imaging.ResizeAuto(src, 320, 200, options)
+if err != nil {
+	log.Printf("resize skipped: %v", err)
+	return
+}
+log.Printf("selected=%s reasons=%v", report.Decision.FilterName, report.Decision.Reasons)
+```
+
+The zero-value `AutoResizePolicy` is disabled. Selection rules are:
+
+- Photo downscale: heavy (`<= 0.35`) uses `Lanczos`, medium uses `CatmullRom`,
+  and light (`> 0.75`) uses `Linear` to avoid over-smoothing.
+- Graphic downscale: text/line art uses `Box` for medium and heavy reductions,
+  and `NearestNeighbor` for slight reductions; cubic filters are avoided.
+- Photo upscale uses `MitchellNetravali`; graphic upscale uses
+  `NearestNeighbor` to preserve hard edges.
+- Unknown image kinds use `Linear` as the conservative fallback. Mixed-axis
+  scaling also uses `Linear`.
+- `SceneHintPortrait`, `SceneHintScreenshot`, and `SceneHintIcon` override
+  metadata-based classification.
+
+`ResizeHistory` records prior resize steps. If the projected chain exceeds the
+policy limit, the default behavior is to return `ErrCumulativeRescale` without
+an output image and recommend resizing directly from the original. Set
+`AllowCumulativeDownscale` only when the caller explicitly accepts a chain.
+
+For best-effort batches, `ResizeBatch` decodes file jobs independently and never
+lets one bad image stop the batch. Each item has a report, and skipped jobs are
+available through `ResizeBatchResult.SkippedJobs` or can be resubmitted with
+`RetrySkipped`.
+
 **Resampling filters comparison**
 
 Original image:
