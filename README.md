@@ -22,6 +22,66 @@ https://pkg.go.dev/github.com/disintegration/imaging
 
 A few usage examples can be found below. See the documentation for the full list of supported functions.
 
+### Target-size encoding
+
+`OptimizeToTargetSize` is an opt-in API that finds an encoder quality for a
+maximum output size. Existing `Save` and `Encode` behavior is unchanged.
+
+```go
+src, err := ioutil.ReadFile("input.jpg")
+if err != nil {
+	log.Fatal(err)
+}
+
+result, err := imaging.OptimizeToTargetSize(src, 100_000)
+if err != nil {
+	var sizeErr *imaging.TargetSizeError
+	if errors.As(err, &sizeErr) {
+		log.Printf("minimum possible size: %d bytes", sizeErr.MinimumBytes)
+	}
+	log.Fatal(err)
+}
+
+log.Printf("final=%d bytes quality=%d iterations=%d cached=%v",
+	result.Bytes, result.Quality, result.Iterations, result.Cached)
+
+err = ioutil.WriteFile("output.jpg", result.Data, 0644)
+```
+
+The default `QualityFirst` mode selects the highest JPEG quality within the
+limit. `SizeFirst` selects the smallest fitting result. The search is
+deterministic, records every attempt in `result.Attempts`, and stops when the
+fitting and non-fitting quality values are adjacent or the iteration limit is
+reached.
+
+Source bytes already within the limit are returned unchanged without encoding.
+PNG, TIFF, and BMP are treated as lossless: an unreachable target returns
+`ErrTargetSizeUnreachable` and a measured `MinimumBytes` estimate instead of
+silently switching to JPEG. JPEG output from an alpha image is composited over
+an opaque background (white by default) and reports `AlphaFlattened`.
+
+An encoder instance owns its cache and in-flight search coalescing:
+
+```go
+encoder := imaging.NewTargetSizeEncoder()
+// Concurrent calls with identical bytes, options, and target share one search.
+// Different targets run independently and each reports its own metrics.
+result, err := encoder.OptimizeToTargetSize(src, 100_000,
+	imaging.TargetSizeSearchMode(imaging.SizeFirst),
+	imaging.TargetSizeMaxIterations(16),
+)
+```
+
+For unit tests, `SearchQuality` accepts an injectable encoder function and
+returns the measured size and quality of every iteration without requiring a
+real image:
+
+```go
+search, err := imaging.SearchQuality(50_000, func(quality int) ([]byte, error) {
+	return encodeForTest(quality), nil
+}, imaging.QualitySearchConfig{MaxIterations: 12})
+```
+
 ### Image resizing
 
 ```go
